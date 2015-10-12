@@ -4,7 +4,6 @@
             [slingshot.slingshot :refer [throw+]]
             [slb-sv-scraper.util :as util]))
 
-(def ^:dynamic *default-base-url* "https://smgs.ams.slb.com/")
 (def ^:dynamic *user-index-url* "sv/user-index.jsp")
 (def ^:dynamic *login-url* "sv/mfgx/login.jsp")
 (def ^:dynamic *login-post-url* "sv/mfgx/j_security_check")
@@ -21,13 +20,12 @@
 
 (defn create-scraper
   "Create a scraper instance for keeping track of session state"
-  ([] (create-scraper nil))
-  ([base-url]
-   {:base-url (or base-url *default-base-url*)
-    :session-id nil
-    :request-headers {}
-    :logged-in-as nil
-    :logged-in-at nil}))
+  [base-url]
+  {:base-url base-url
+   :session-id nil
+   :request-headers {}
+   :logged-in-as nil
+   :logged-in-at nil})
 
 (defn set-session
   "Set the session details of a scraper
@@ -57,20 +55,19 @@
 (defn login
   "Logs in to SV using the specified credentials, returning an updated
   scraper or throwing an error if any part of the request fails"
-  ([username password] (login (create-scraper) username password))
-  ([scraper username password]
-   (let [s (establish-session scraper)
-         url (str (:base-url s) *login-post-url*)
-         resp @(http/post url {:headers (:request-headers s)
-                               :form-params {"j_username" username
-                                             "j_password" password}
-                               :follow-redirects false})]
-     (if (redirect-to-user-index? resp)
-       (assoc s :logged-in-as username :logged-in-at now)
-       (throw+ {:type ::login-failure
-                :scraper scraper
-                :credentials {:username username :password password}
-                :http-response resp})))))
+  [scraper username password]
+  (let [s (establish-session scraper)
+        url (str (:base-url s) *login-post-url*)
+        resp @(http/post url {:headers (:request-headers s)
+                              :form-params {"j_username" username
+                                            "j_password" password}
+                              :follow-redirects false})]
+    (if (redirect-to-user-index? resp)
+      (assoc s :logged-in-as username :logged-in-at now)
+      (throw+ {:type ::login-failure
+               :scraper scraper
+               :credentials {:username username :password password}
+               :http-response resp}))))
 
 (defn logout
   "Logs out of the session associated with the provided scraper,
@@ -83,8 +80,9 @@
 (defmacro with-scraper-session
   "Creates a scraper logged in as the specified user, binding it to
   `session-name` within the provided body."
-  [[session-name username password] & body]
-  `(let [~session-name (login ~username ~password)
+  [[session-name base-url username password] & body]
+  `(let [scraper# (create-scraper ~base-url)
+         ~session-name (login scraper# ~username ~password)
          r# (doall ~@body)]
      (logout ~session-name)
      r#))
