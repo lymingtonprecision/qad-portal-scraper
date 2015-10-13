@@ -8,6 +8,7 @@
 
 (def ^:dynamic *item-url* "sv/item.do")
 (def ^:dynamic *bom-url* "sv/item/BOMReport.do")
+(def ^:dynamic *report-url* "sv/report.do")
 
 (defn- org-id [page]
   (->> (html/select page [:#orgContext :a])
@@ -45,19 +46,45 @@
 (defn- bom-items->bom-tree [items]
   (assoc (first items) :components (bu/bom-table->bom-tree (rest items))))
 
+(defn- bom-item-ids
+  [item]
+  {"itemPlaceSysID" (get item "itemPlaceSysID")
+   "entitySysID" (get item "itemPlaceSysID")
+   "orgSysID" (get item "orgSysID")
+   "itemID" (get item :value)
+   "level" "999"})
+
 (defn get-bom
   "Retrieves the Bill Of Materials for an item in SV, returning a nested map of
   the components or throwing an error if the request fails."
   [scraper item]
   (let [i (get-item scraper item)
-        resp @(util/post *bom-url* scraper
-                         {:form-params {"itemPlaceSysID" (get i "itemPlaceSysID")
-                                        "entitySysID" (get i "itemPlaceSysID")
-                                        "orgSysID" (get i "orgSysID")
-                                        "level" "999"}})]
+        resp @(util/post *bom-url* scraper {:form-params (bom-item-ids i)})]
     (if (= 200 (:status resp))
       (-> resp :body util/stream->html bom-items bom-items->bom-tree)
       (throw+ {:type ::bom-fetch
+               :scraper scraper
+               :item item
+               :http-response resp}))))
+
+(defn get-bom-pdf
+  "Retrieves the Bill Of Materials report for an item in SV, returning
+  an IO stream of the PDF file contents or throwing an error if the
+  request fails."
+  [scraper item]
+  (let [i (get-item scraper item)
+        item-ids (bom-item-ids i)
+        resp @(util/post *report-url* scraper
+                         {:query-params (merge
+                                         {"action" "runB"
+                                          "oldAction" (str "/" *bom-url*)}
+                                         item-ids)
+                          :form-params (merge
+                                        {"orientationB" "LANDSCAPE"}
+                                        item-ids)})]
+    (if (= 200 (:status resp))
+      (:body resp)
+      (throw+ {:type ::bom-pdf-fetch
                :scraper scraper
                :item item
                :http-response resp}))))
