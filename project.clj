@@ -1,5 +1,5 @@
-(defproject slb-sv-scraper "0.1.0"
-  :description "A library for automating interaction with Schlumberger's Supply Chain (SV) Portal"
+(defproject qad-portal-scraper "0.1.0"
+  :description "A library for automating interaction with QAD Supplier Portal sites"
   :url "http://example.com/FIXME"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}

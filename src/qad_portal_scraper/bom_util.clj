@@ -1,4 +1,4 @@
-(ns slb-sv-scraper.bom-util
+(ns qad-portal-scraper.bom-util
   (:require [clojure.string :as str])
   (:import [java.lang Integer Double]))
 

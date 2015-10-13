@@ -1,8 +1,8 @@
-(ns slb-sv-scraper.session
+(ns qad-portal-scraper.session
   (:require [org.httpkit.client :as http]
             [clj-time.core :refer [now]]
             [slingshot.slingshot :refer [throw+]]
-            [slb-sv-scraper.util :as util]))
+            [qad-portal-scraper.util :as util]))
 
 (def ^:dynamic *user-index-url* "sv/user-index.jsp")
 (def ^:dynamic *login-url* "sv/mfgx/login.jsp")

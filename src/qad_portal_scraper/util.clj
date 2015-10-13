@@ -1,4 +1,4 @@
-(ns slb-sv-scraper.util
+(ns qad-portal-scraper.util
   (:refer-clojure :exclude [get])
   (:require [org.httpkit.client :as http]
             [net.cgrand.enlive-html :as html]

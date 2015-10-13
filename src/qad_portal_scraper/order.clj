@@ -1,8 +1,8 @@
-(ns slb-sv-scraper.order
+(ns qad-portal-scraper.order
   (:require [slingshot.slingshot :refer [throw+]]
             [org.httpkit.client :as http]
             [net.cgrand.enlive-html :as html]
-            [slb-sv-scraper.util :as util]))
+            [qad-portal-scraper.util :as util]))
 
 (def ^:dynamic *orders-url* "sv/orders/list-orders.do")
 

@@ -1,10 +1,10 @@
-(ns slb-sv-scraper.item
+(ns qad-portal-scraper.item
   (:require [clojure.string :as str]
             [slingshot.slingshot :refer [throw+]]
             [net.cgrand.enlive-html :as html]
-            [slb-sv-scraper.session :as session]
-            [slb-sv-scraper.util :as util]
-            [slb-sv-scraper.bom-util :as bu]))
+            [qad-portal-scraper.session :as session]
+            [qad-portal-scraper.util :as util]
+            [qad-portal-scraper.bom-util :as bu]))
 
 (def ^:dynamic *item-url* "sv/item.do")
 (def ^:dynamic *bom-url* "sv/item/BOMReport.do")
