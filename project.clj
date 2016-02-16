@@ -9,7 +9,6 @@
                  [http-kit "2.1.19"]
                  [enlive "1.1.6"]]
   :plugins [[lein-codox "0.9.4"]]
-  :profiles {:dev {:dependencies [[reloaded.repl "0.2.1"]]}}
   :codox {:source-uri "https://github.com/lymingtonprecision/qad-portal-scraper/blob/master/{filepath}#{line}"
           :output-path "./gh-pages"
           :doc-paths []
