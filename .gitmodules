@@ -1,0 +1,4 @@
+[submodule "gh-pages"]
+	path = gh-pages
+	url = https://github.com/lymingtonprecision/qad-portal-scraper
+	branch = gh-pages
