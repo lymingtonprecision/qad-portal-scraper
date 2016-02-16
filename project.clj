@@ -1,4 +1,4 @@
-(defproject lymingtonprecision/qad-portal-scraper "0.1.0"
+(defproject lymingtonprecision/qad-portal-scraper "0.1.1-SNAPSHOT"
   :description "A library for automating interaction with QAD Supplier Portal sites"
   :url "https://github.com/lymingtonprecision/qad-portal-scraper"
   :license {:name "Eclipse Public License"
