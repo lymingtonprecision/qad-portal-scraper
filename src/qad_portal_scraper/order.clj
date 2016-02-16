@@ -1,129 +1,112 @@
 (ns qad-portal-scraper.order
-  (:require [slingshot.slingshot :refer [throw+]]
-            [org.httpkit.client :as http]
-            [net.cgrand.enlive-html :as html]
-            [qad-portal-scraper.util :as util]))
+  (:require [schema.core :as s]
+            [qad-portal-scraper.schema :refer [Order OrderID]]
+            [qad-portal-scraper.filters :as filters]
+            [qad-portal-scraper.http :as http]
+            [qad-portal-scraper.util :as util]
+            [qad-portal-scraper.order.parse :as parse]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Default URL Paths
 
 (def ^:dynamic *orders-url* "sv/orders/list-orders.do")
 
-(def order-columns
-  ["OrderNumber"
-   "OrderLine"
-   "ItemID"
-   "ItemRevision"
-   "UM"
-   "OrderQuantity"
-   "DueDate"])
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Constants
 
-(defn extract-context-key-from-body [body]
-  (let [res (html/html-resource body)
-        k (html/select res [[:input (html/attr-ends :name "_KEY")]])
-        km (reduce (fn [m {{n :name v :value} :attrs}] (assoc m n v)) {} k)]
-    {:context (get km "slc_CONTEXT_KEY") :key (get km "slc_KEY")}))
+(def order-attributes-to-request
+  (keys parse/order-attribute->record-key))
 
-(defn get-order-context-key
-  "Retrieves the current order context key from SV for the session
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Request utility fns
+
+(defn context-key
+  "Retrieves the current order context key from the portal for the session
   established by the scraper. Throws an error if the request fails."
   [scraper]
-  (let [resp @(util/get *orders-url* scraper)
-        b (util/stream->html (:body resp))]
+  (let [resp (http/GET *orders-url* scraper)]
     (if (= 200 (:status resp))
-      (extract-context-key-from-body b)
-      (throw+ {:type ::context-fetch
-               :scraper scraper
-               :http-response resp}))))
+      (util/extract-context-key (:body resp))
+      (throw (ex-info "failed to get order page for context key"
+                      {:type ::fetch-order-context
+                       :scraper scraper
+                       :http-response resp})))))
 
-(defn- fp  [c n] (str n "_" (:key c)))
+(defn filters-and-context
+  "Returns a tuple of the current `[filters context]` in use on the orders page
+  for the provided scraper session."
+  [scraper]
+  (let [resp (http/POST *orders-url* scraper
+               {:form-params {"activeTab" "filter"
+                              "lastTab" "filter"
+                              "lastTabSupport" "data"}})]
+    (if (= 200 (:status resp))
+      (let [page (util/stream->html (:body resp))]
+        [(filters/from-page page)
+         (util/extract-context-key page)])
+      (throw (ex-info
+              "failed to fetch order filter page"
+              {:type ::fetch-order-filter
+               :http-response resp
+               :scraper scraper})))))
 
-(defn form-params
-  ([order-no context] (form-params order-no context 1))
-  ([order-no context page]
+(defn fetch-data-params
+  "Returns the parameters required to retrieve the orders matching the provided
+  `filters`."
+  [context filters]
+  (merge
    {"slc_KEY" (:key context)
     "slc_CONTEXT_KEY" (:context context)
     "activeTab" "data"
     "lastTab" "data"
     "lastTabSupport" "filter"
-    (fp context "slc_CND_ACTION") ""
-    (fp context "slc_PAGE") (max 0 (dec page)) ; page numbers are zero-indexed in SV
-    (fp context "slc_PAGE_SIZE") "100"} ))
+    "applyAtts" "true"
+    (util/in-context "slc_ATT_REORDER" context) order-attributes-to-request
+    (util/in-context "slc_PAGE" context) 0
+    (util/in-context "slc_PAGE_SIZE" context) "100"
+    (util/in-context "slc_CND_ACTION" context) "replace"}
+   (filters/params filters context)))
 
-(defn filter-form-params [order-no context]
-  (merge (form-params order-no context)
-         {"applyAtts" "true"
-          (fp context "slc_ATT_REORDER") order-columns
-          (fp context "slc_CND_ACTION") "replace"
-          (fp context "slc_CND_CTX") "OrderNumber:java.lang.String"
-          (fp context "slc_CND_OP") "="
-          (fp context "slc_CND_VAL") order-no}))
+(defn update-page-number
+  "Replaces the requested page number in the provided `params` map with page
+  `n`."
+  [params context n]
+  {:pre [(pos? n)]}
+  (assoc params (util/in-context "slc_PAGE" context) (dec n)))
 
-(defn- attribute-names [page]
-  (map #(->> % :attrs :href (re-find #"value='6:([A-Za-z]+)';") second)
-       (html/select page [:#AttributeNames :th :a])))
+(defn fetch-order-page
+  [scraper params & ex-info]
+  (let [resp (http/POST *orders-url* scraper {:form-params params})]
+    (if (= 200 (:status resp))
+      (util/stream->html (:body resp))
+      (throw (ex-info
+              (str "failed to fetch order")
+              (merge {:type ::fetch-order
+                      :http-response resp
+                      :scraper scraper
+                      :params params}
+                     ex-info))))))
 
-(defn- page-range [page]
-  (-> (html/select page [:#GridNavigation])
-      first
-      (html/select [#{:button.PaginationInContext :button.Pagination}
-                    (html/text-pred #(re-matches #"\d+" %))])
-      (->> (map #(java.lang.Integer. %)) sort)))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Public
 
-(defn- link-params [href]
-  (if href
-    (->> href
-         (re-seq #"setParam\(document\.getElementById\('fmain'\),'([A-Za-z]+)','([^']+)'\);")
-         (reduce (fn [r [_ k v]] (assoc r k v)) {}))))
-
-(defn- cell->value [c]
-  (let [content (-> c :content first)
-        text (clojure.string/join (html/select content [html/text-node]))
-        lp (if (associative? content)
-             (link-params (-> (html/select c [:a]) first :attrs :href)))]
-    (merge {:value text} lp)))
-
-(defn- order-lines [page column-names]
-  (map #(->> % :content rest butlast
-             (map cell->value)
-             (zipmap column-names))
-       (html/select page [:table.Grid :tr.alt])))
-
-(defn- all-items-unique-and-from-order? [order-no items]
-  (if (seq items)
-    (let [on (distinct (map #(-> % (get "OrderNumber") :value) items))
-          lc (count items)
-          ln (distinct (map #(-> % (get "OrderLine") :value java.lang.Integer.)
-                            items))]
-      (and (= on [order-no])
-           (= (count ln) lc)))
-    true))
-
-(defn- get-order-page [scraper context order-no page]
-  (let [params (if (= page 1)
-                 (filter-form-params order-no context)
-                 (form-params order-no context page))
-        req (util/post *orders-url* scraper {:form-params params})]
-    #(let [resp @req]
-       (if (= 200 (:status resp))
-         resp
-         (throw+ {:type ::order-fetch
-                  :http-response resp
-                  :scraper scraper
-                  :context context
-                  :order-no order-no
-                  :page page})))))
-
-(defn get-order
-  "Retrieves the specified order details from SV, returning a collection of the
-  order lines. Throws an error if a request fails."
-  [scraper order-no]
-  {:post [(all-items-unique-and-from-order? order-no %)]}
-  (let [c (get-order-context-key scraper)
-        get-page (partial get-order-page scraper c order-no)
-        first-page (get-page 1)
-        b (util/stream->html (:body (first-page)))
-        h (attribute-names b)
-        pages (map #(if (= % 1) first-page (get-page %)) (page-range b))]
-    (reduce
-      (fn [r page]
-        (concat r (order-lines (util/stream->html (:body (page))) h)))
-      []
-      (if (seq pages) pages [first-page]))))
+(s/defn fetch-order :- (s/maybe Order)
+  "Retrieves the specified order details. Throws an error if a request fails."
+  [scraper order :- OrderID]
+  (let [[filters cntx] (filters-and-context scraper)
+        order-filter (-> (filters/unset-all filters)
+                         (assoc-in ["OrderNumber" :value] order))
+        params (fetch-data-params cntx order-filter)
+        fetch-page #(fetch-order-page
+                     scraper
+                     (update-page-number params cntx %)
+                     {:order order :page %})
+        first-page (fetch-page 1)
+        pages (reduce
+               (fn [rs page-num]
+                 (conj rs (fetch-page page-num)))
+               [first-page]
+               (rest (parse/page-range first-page)))
+        headers (parse/column-headings first-page)]
+    (-> (reduce #(parse/orders %2 %1 headers) {} pages)
+        (get order))))

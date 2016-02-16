@@ -1,10 +1,13 @@
-(defproject qad-portal-scraper "0.1.0"
+(defproject qad-portal-scraper "0.1.0-SNAPSHOT"
   :description "A library for automating interaction with QAD Supplier Portal sites"
-  :url "http://example.com/FIXME"
+  :url "https://github.com/lymingtonprecision/qad-portal-scraper"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.7.0"]
-                 [slingshot "0.12.2"]
+                 [prismatic/schema "1.0.4"]
                  [clj-time "0.11.0"]
                  [http-kit "2.1.19"]
-                 [enlive "1.1.6"]])
+                 [enlive "1.1.6"]]
+  :plugins [[lein-codox "0.9.4"]]
+  :profiles {:dev {:dependencies [[reloaded.repl "0.2.1"]]}}
+  :codox {:metadata {:doc/format :markdown}})

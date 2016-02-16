@@ -1,90 +1,84 @@
 (ns qad-portal-scraper.item
-  (:require [clojure.string :as str]
-            [slingshot.slingshot :refer [throw+]]
+  (:require [clojure.string :as string]
+            [clojure.set :refer [rename-keys]]
             [net.cgrand.enlive-html :as html]
-            [qad-portal-scraper.session :as session]
-            [qad-portal-scraper.util :as util]
-            [qad-portal-scraper.bom-util :as bu]))
+            [schema.core :as s]
+            [qad-portal-scraper.schema :refer [Item]]
+            [qad-portal-scraper.http :as http]
+            [qad-portal-scraper.util :as util]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Default URL Paths
 
 (def ^:dynamic *item-url* "sv/item.do")
-(def ^:dynamic *bom-url* "sv/item/BOMReport.do")
-(def ^:dynamic *report-url* "sv/report.do")
 
-(defn- org-id [page]
-  (->> (html/select page [:#orgContext :a])
-       first :attrs :href
-       (re-find #"customerOrgSysID=(\d+)")
-       second))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Utility fns
 
-(defn get-item
-  "Retrieves an items details from SV or throws an error if the request fails."
-  [scraper item]
-  (let [resp @(util/get *item-url* scraper
-                        {:query-params (select-keys item ["itemPlaceSysID"
-                                                          "supplierOrgSysID"
-                                                          "poLineSysID"])})]
-    (if (= 200 (:status resp))
-      (-> (util/stream->html (:body resp)) org-id (->> (assoc item "orgSysID")))
-      (throw+ {:type ::item-fetch
-               :scraper scraper
-               :item item
-               :http-response resp}))))
+(defn item-details-table [page]
+  (first (html/select page [:.NestedDetail :table.Detail])))
 
-(defn- bom-headers [page]
-  (remove
-    nil?
-    (html/select page [:table.Grid :tr :span.detailHeaderBOM html/text-node])))
+(defn map-item-rows [table]
+  (reduce
+   (fn [rs tr]
+     (let [th (-> tr (html/select [:th]) first :content first)
+           td (-> tr (html/select [:td]) first :content)
+           label (string/replace th #":$" "")]
+       (assoc rs label td)))
+   {}
+   (html/select table [:tr])))
 
-(defn- bom-items [page]
-  (let [headers (bom-headers page)]
-    (->> (html/select page [:table.Grid :tr])
-         (drop 1)
-         (map #(->> (html/select % [:td html/text-node])
-                    (map (fn [s] (str/replace s #"\xa0" "")))
-                    (zipmap headers))))))
+(defn item-org-ids [org-cell]
+  (-> (html/select org-cell [:a])
+      first
+      :attrs
+      :href
+      util/link-params
+      (rename-keys {"pOrgSysID" "orgSysID"})))
 
-(defn- bom-items->bom-tree [items]
-  (assoc (first items) :components (bu/bom-table->bom-tree (rest items))))
+(defn sanitize-keys-and-values [item]
+  (reduce
+   (fn [rs [k v]]
+     (case k
+       "Item ID" (assoc rs :item/id (first v))
+       "Organization" (assoc rs :qad/ids (item-org-ids v))
+       "Description" (assoc rs :item/description (first v))
+       "UM" (assoc rs :item/default-uom (first v))
+       "BOM Report" (assoc rs :item/has-bom? (some? v))
+       rs))
+   {}
+   item))
 
-(defn- bom-item-ids
-  [item]
-  {"itemPlaceSysID" (get item "itemPlaceSysID")
-   "entitySysID" (get item "itemPlaceSysID")
-   "orgSysID" (get item "orgSysID")
-   "itemID" (get item :value)
-   "level" "999"})
+(defn parse [page]
+  (some-> page
+          item-details-table
+          map-item-rows
+          not-empty
+          sanitize-keys-and-values))
 
-(defn get-bom
-  "Retrieves the Bill Of Materials for an item in SV, returning a nested map of
-  the components or throwing an error if the request fails."
-  [scraper item]
-  (let [i (get-item scraper item)
-        resp @(util/post *bom-url* scraper {:form-params (bom-item-ids i)})]
-    (if (= 200 (:status resp))
-      (-> resp :body util/stream->html bom-items bom-items->bom-tree)
-      (throw+ {:type ::bom-fetch
-               :scraper scraper
-               :item item
-               :http-response resp}))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Public
 
-(defn get-bom-pdf
-  "Retrieves the Bill Of Materials report for an item in SV, returning
-  an IO stream of the PDF file contents or throwing an error if the
-  request fails."
-  [scraper item]
-  (let [i (get-item scraper item)
-        item-ids (bom-item-ids i)
-        resp @(util/post *report-url* scraper
-                         {:query-params (merge
-                                         {"action" "runB"
-                                          "oldAction" (str "/" *bom-url*)}
-                                         item-ids)
-                          :form-params (merge
-                                        {"orientationB" "LANDSCAPE"}
-                                        item-ids)})]
-    (if (= 200 (:status resp))
-      (:body resp)
-      (throw+ {:type ::bom-pdf-fetch
-               :scraper scraper
-               :item item
-               :http-response resp}))))
+(s/defn fetch-item :- (s/maybe Item)
+  "Retrieves an items details from SV or throws an error if the request fails.
+
+  The returned map of item details will include a `:has-bom?` key that will be
+  `true` when the items details indicate it has a BOM available via SV and false
+  if no BOM is available."
+  ([scraper
+    {{item-id "itemPlaceSysID" org-id "supplierOrgSysID"} :qad/ids :as item}]
+   (fetch-item scraper item-id org-id))
+  ([scraper item-id org-id]
+   (let [resp (http/GET *item-url* scraper
+                {:query-params {"itemPlaceSysID" item-id
+                                "supplierOrgSysID" org-id}})]
+     (if (= 200 (:status resp))
+       (some-> (parse (util/stream->html (:body resp)))
+               (update :qad/ids merge {"itemPlaceSysID" item-id "supplierOrgSysID" org-id}))
+       (throw (ex-info
+               "failed to retrieve item details"
+               {:type ::fetch-item
+                :scraper scraper
+                :item-id item-id
+                :supplier-org-id org-id
+                :http-response resp}))))))

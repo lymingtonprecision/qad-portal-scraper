@@ -1,16 +1,22 @@
 (ns qad-portal-scraper.session
-  (:require [org.httpkit.client :as http]
-            [clj-time.core :refer [now]]
-            [slingshot.slingshot :refer [throw+]]
-            [qad-portal-scraper.util :as util]))
+  (:require [clj-time.core :as time]
+            [qad-portal-scraper.http :as http]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Default URL Paths
 
 (def ^:dynamic *user-index-url* "sv/user-index.jsp")
 (def ^:dynamic *login-url* "sv/mfgx/login.jsp")
 (def ^:dynamic *login-post-url* "sv/mfgx/j_security_check")
 (def ^:dynamic *logout-url* "sv/logout.do")
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Utility fns
+
 (defn redirect-to-url?
-  [url {:keys [status headers error]}]
+  "Returns true if the given `http-response` map is a redirect to the specified
+  `url`."
+  [url {:keys [status headers error] :as http-response}]
   (and (nil? error)
        (= 302 status)
        (re-find (re-pattern url) (:location headers))))
@@ -18,71 +24,82 @@
 (def redirect-to-login? (partial redirect-to-url? *login-url*))
 (def redirect-to-user-index? (partial redirect-to-url? *user-index-url*))
 
-(defn create-scraper
-  "Create a scraper instance for keeping track of session state"
-  [base-url]
-  {:base-url base-url
-   :session-id nil
-   :request-headers {}
-   :logged-in-as nil
-   :logged-in-at nil})
+(defn update-session
+  "Updates the session details of a scraper from those provided by the server in
+  the given HTTP `response`.
 
-(defn set-session
-  "Set the session details of a scraper
   Returns a copy of `scraper` with the new session details"
-  [scraper {:keys [headers]}]
+  [scraper {:keys [headers] :as response}]
   (let [c (:set-cookie headers)
-        id (second (re-find #"=([A-Za-z0-9]+);" c))
-        s (assoc scraper :session-id id)]
-    (update-in s [:request-headers] #(assoc % "Cookie" c))))
+        id (second (re-find #"=([A-Za-z0-9]+);" c))]
+    (-> scraper
+        (assoc :session-id id)
+        (assoc-in [:request-headers "Cookie"] c))))
 
 (defn establish-session
-  "Establishes/validates the SV session of a scraper
+  "Establishes/validates the portal session of a scraper.
 
-  Returns the scraper if it represents a valid session, a copy of the
-  scraper with new session details, or throws an error"
+  Returns the scraper if it represents a valid session, a copy of the scraper
+  with new session details, or returns a `::session-failure` error."
   [scraper]
-  (let [url (str (:base-url scraper) *user-index-url*)
-        resp @(http/get url {:headers (:request-headers scraper)
-                             :follow-redirects false})]
+  (let [resp (http/GET *user-index-url* scraper)]
     (cond
-      (-> resp :headers :set-cookie) (set-session scraper resp)
+      (-> resp :headers :set-cookie) (update-session scraper resp)
       (contains? #{200 302} (:status resp)) scraper
-      :else (throw+ {:type ::session-failure
-                     :scraper scraper
-                     :http-response resp}))))
+      :else (throw (ex-info "invalid session"
+                            {:type ::session-failure
+                             :scraper scraper
+                             :http-response resp})))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Public
+
+(defrecord Scraper [base-url]
+  java.io.Closeable
+  (close [this]
+    (when (:session-id this)
+      (http/GET *logout-url* this)
+      (assoc this :session-id nil :logged-in-as nil :logged-in-at nil))))
+
+(defn scraper
+  "Create a scraper instance for keeping track of session state"
+  [base-url]
+  (->Scraper base-url))
 
 (defn login
-  "Logs in to SV using the specified credentials, returning an updated
-  scraper or throwing an error if any part of the request fails"
-  [scraper username password]
-  (let [s (establish-session scraper)
-        url (str (:base-url s) *login-post-url*)
-        resp @(http/post url {:headers (:request-headers s)
-                              :form-params {"j_username" username
-                                            "j_password" password}
-                              :follow-redirects false})]
+  "Logs in to the portal using the specified credentials, returning an updated
+  scraper, or throwing a `::login-failure` error if any part of the request
+  fails.
+
+  `scraper-or-url` can either be an existing scraper record or the base URL
+  string of the portal.
+
+  The recommended way to use scrapers is inside a `with-open` block so that the
+  associated state is nicely encapsulated:
+
+      (with-open [s (session/login portal-url username password)]
+        ...use session...)
+
+  Scrapers implement the `java.io.Closeable` interface and will logout of the
+  portal when `.close`d."
+  [scraper-or-url username password]
+  (let [s (-> (if (:base-url scraper-or-url)
+                scraper-or-url
+                (scraper scraper-or-url))
+              establish-session)
+        resp (http/POST *login-post-url* s
+               {:form-params {"j_username" username
+                              "j_password" password}})]
     (if (redirect-to-user-index? resp)
-      (assoc s :logged-in-as username :logged-in-at now)
-      (throw+ {:type ::login-failure
-               :scraper scraper
-               :credentials {:username username :password password}
-               :http-response resp}))))
+      (assoc s :logged-in-as username :logged-in-at (time/now))
+      (throw (ex-info "login failed"
+                      {:type ::login-failure
+                       :scraper scraper
+                       :credentials {:username username :password password}
+                       :http-response resp})))))
 
 (defn logout
   "Logs out of the session associated with the provided scraper,
-  returning a new scraper instance using the same base URL"
+  returning a new scraper instance using the same base URL."
   [scraper]
-  (do
-    @(util/get *logout-url* scraper)
-    (create-scraper (:base-url scraper))))
-
-(defmacro with-scraper-session
-  "Creates a scraper logged in as the specified user, binding it to
-  `session-name` within the provided body."
-  [[session-name base-url username password] & body]
-  `(let [scraper# (create-scraper ~base-url)
-         ~session-name (login scraper# ~username ~password)
-         r# (doall ~@body)]
-     (logout ~session-name)
-     r#))
+  (.close scraper))
