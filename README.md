@@ -18,9 +18,7 @@ and with as much additional data included in the `ex-data` map as possible
 
 Add the library to your `project.clj` dependencies:
 
-```clojure
-:dependencies [["qad-portal-scraper" "0.1.0"]]
-```
+[![Clojars Project](https://img.shields.io/clojars/v/lymingtonprecision/qad-portal-scraper.svg)](https://clojars.org/lymingtonprecision/qad-portal-scraper)
 
 Create a session and retrieve an order, print the number of lines:
 
